@@ -1,0 +1,28 @@
+{
+  "_comment": "Sources for scripts/build-plugin-index.mjs. Add GitHub repos as 'owner/repo' under \"repos\", or whole users/orgs under \"users\" (every public repo is scanned). \"repoDirs\" is seeded from the existing catalog (repoDir = owner-repo joined by '-'; the script resolves the split via the GitHub API). Only MIT/Unlicense repos are included; plugins containing @no-localize are skipped.",
+  "allowedLicenses": [
+    "MIT",
+    "Unlicense"
+  ],
+  "users": [],
+  "repos": [],
+  "repoDirs": [
+    "GaryCXJk-rmmz-plugins",
+    "Jim00000-RMMZ-Plugin-Collection",
+    "LyraVultur-RPGMakerPlugins",
+    "MihailJP-mihamzplugin",
+    "MrNybbles-RPG-Maker-MV",
+    "TorD-mz-plugins",
+    "Zami77-RPG_Maker_MZ_Plugins",
+    "aloeguvner-rpg-maker-mv",
+    "f-space-rmmz-plugins",
+    "jakemoresca-RMMVMZ-Tactics-System",
+    "kuroudo119-RPGMZ-Plugin",
+    "nz-prism-RPG-Maker-MZ",
+    "scswinter-MultiTweaks",
+    "suibotsukuiki-RPGMakerMZ",
+    "triacontane-RPGMakerMV",
+    "unagiootoro-RPGMZ",
+    "white-mns-RPGMakerMZPlugin"
+  ]
+}

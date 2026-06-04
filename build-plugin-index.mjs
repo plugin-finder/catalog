@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Self-contained catalog generator for the plugin-localizer/catalog repo.
+// Self-contained catalog generator for the plugin-finder/catalog repo.
 // No dependencies beyond Node 20+ (global fetch). Rebuilds plugin-index.json
 // from the GitHub sources listed in index-sources.json.
 //
@@ -94,7 +94,7 @@ export function pluginSourceToEntry(src, { owner, repo, relativePath, license })
 }
 
 function ghHeaders() {
-  const h = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'plugin-localizer-catalog' };
+  const h = { 'Accept': 'application/vnd.github+json', 'User-Agent': 'plugin-finder-catalog' };
   if (TOKEN) h.Authorization = `Bearer ${TOKEN}`;
   return h;
 }

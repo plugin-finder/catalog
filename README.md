@@ -1,6 +1,6 @@
-# plugin-localizer / catalog
+# plugin-finder / catalog
 
-Public catalog index for **Plugin Localizer**. `plugin-index.json` lists RPG Maker
+Public catalog index for **Plugin Finder**. `plugin-index.json` lists RPG Maker
 MV/MZ plugins published on GitHub under the **MIT License** or the **Unlicense**.
 The app fetches this file to populate its in-app plugin search.
 

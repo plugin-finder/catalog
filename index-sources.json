@@ -1,5 +1,5 @@
 {
-  "_comment": "Sources for build-plugin-index.mjs. Add GitHub repos as 'owner/repo' under \"repos\", or whole users/orgs under \"users\" (every public repo is scanned). \"repoDirs\" is legacy 'owner-repo' format. A plugin is included only with an explicit MIT grant: the repo's SPDX license, or an MIT declaration in the plugin header. Plugins containing @no-localize are skipped.",
+  "_comment": "Sources for build-plugin-index.mjs. Add GitHub repos as 'owner/repo' under \"repos\", or whole users/orgs under \"users\" (every public repo is scanned). \"repoDirs\" is seeded from the existing catalog (repoDir = owner-repo joined by '-'; the script resolves the split via the GitHub API). \"searchQueries\" = repository search; \"codeSearchQueries\" = code search over the plugin annotations themselves (auth required; finds repos with no metadata and header-only MIT grants worldwide). Automatically discovered repos that ship the RPG Maker runtime (deployed games) are skipped. A plugin is included only with an explicit MIT grant: the repo's SPDX license, or an MIT declaration in the plugin header (for repos without a LICENSE file). Plugins containing @no-localize are skipped.",
   "allowedLicenses": [
     "MIT"
   ],
@@ -8,10 +8,24 @@
     "RPGツクールMV プラグイン",
     "rpg maker mz plugin",
     "rpg maker mv plugin",
+    "rmmz plugin",
+    "rmmv plugin",
+    "\"rpg maker\" plugin in:name,description",
+    "\"rpg maker\" 插件",
+    "\"rpg maker\" 플러그인",
     "topic:rpg-maker-mz",
     "topic:rpg-maker-mv",
     "topic:rpgmakermz",
-    "topic:rpgmakermv"
+    "topic:rpgmakermv",
+    "topic:rpgmaker",
+    "topic:rpg-maker",
+    "topic:rmmz",
+    "topic:rmmv"
+  ],
+  "codeSearchQueries": [
+    "\"@target MZ\" extension:js",
+    "\"@plugindesc\" \"MIT License\" extension:js",
+    "\"@plugindesc\" \"MITライセンス\" extension:js"
   ],
   "users": [
     "doujinreviewers",
@@ -50,7 +64,6 @@
     "Sigureya/RPGmakerMZ",
     "t-kendama/RPGMakerMZ",
     "tonbijp/RPGMakerMZ",
-    "tonbijp/RPGMakerMV",
     "utsudashinou/RPGMakerMV"
   ],
   "repoDirs": [

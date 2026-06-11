@@ -5,8 +5,8 @@
 //
 //   GITHUB_TOKEN=ghp_xxx node build-plugin-index.mjs
 //
-// Only MIT/Unlicense repos are included; plugins containing @no-localize are
-// skipped (author opt-out). On a per-repo fetch failure the repo's existing
+// Only repos/plugins with an EXPLICIT MIT license grant are included; plugins
+// containing @no-localize are skipped (author opt-out). On a per-repo fetch failure the repo's existing
 // entries are kept, so a transient outage never drops plugins.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -32,6 +32,9 @@ export function splitRepoDir(repoDir) {
 
 // Minimal annotation read: scan /*: blocks and prefer the default/English one
 // (the catalog shows English descriptions). Returns author/plugindesc/target/help.
+// Lines may or may not carry the conventional leading ` * ` — the MZ
+// PluginManager accepts bare `@tag` lines too (e.g. unagiootoro's plugins),
+// so the tag regex treats the asterisk as optional.
 export function extractMeta(src) {
   if (!src) return null;
   const norm = src.replace(/\r\n/g, '\n');
@@ -43,7 +46,7 @@ export function extractMeta(src) {
   const pick = blocks.find(b => b.locale === '' || b.locale.toLowerCase() === 'en') || blocks[0];
   const body = pick.body;
   const tag = (name) => {
-    const mm = body.match(new RegExp('^\\s*\\*\\s*@' + name + '\\s*(.*)$', 'mi'));
+    const mm = body.match(new RegExp('^\\s*\\*?\\s*@' + name + '\\s*(.*)$', 'mi'));
     return mm ? mm[1].trim() : '';
   };
   return { author: tag('author'), plugindesc: tag('plugindesc'), target: tag('target'), help: body };
@@ -65,13 +68,27 @@ export function deriveTags(text) {
   return TAG_KEYWORDS.filter(t => hay.includes(t));
 }
 
-// Detect an MIT/Unlicense declaration in the plugin's own header. Many authors
+// Deployed-game detector. A tree that ships the RPG Maker runtime
+// (js/rpg_core.js = MV, js/rmmz_core.js = MZ) is a game project, not a plugin
+// collection: its js/plugins/ folder holds COPIES of third-party plugins
+// (often outdated, attributed to the wrong repo). Automatically discovered
+// game repos are skipped entirely; manually seeded repos[]/repoDirs[] are
+// curated by a human and never skipped.
+export function isGameProjectTree(paths) {
+  return (paths || []).some(p => /(^|\/)js\/(rmmz_core|rpg_core)\.js$/i.test(p));
+}
+
+// Detect an explicit MIT declaration in the plugin's own header. Many authors
 // state the license in the file even when the repository has no LICENSE file
-// (common for Japanese plugin authors). Returns 'MIT' / 'Unlicense' / null.
+// (common for Japanese plugin authors). Returns 'MIT' / null.
+//
+// Only an explicit MIT grant counts. Anything else — including "Unlicensed",
+// "public domain", or the Unlicense — is treated as all-rights-reserved and
+// excluded: a file without a clear, recognized license grant must not be
+// redistributed.
 export function detectLicenseFromSource(src) {
   if (!src) return null;
   const head = src.slice(0, 8000);
-  if (/Unlicense|public\s+domain/i.test(head)) return 'Unlicense';
   if (/MIT\s+Licen[sc]e|MITライセンス|releas\w*\s+under\s+(the\s+)?MIT|under\s+the\s+MIT|@licen[sc]e\s+MIT|licen[sc]e[:：]?\s*MIT|ライセンス[:：]?\s*MIT/i.test(head)) return 'MIT';
   return null;
 }
@@ -138,32 +155,113 @@ async function listJsFiles(owner, repo, branch) {
   return tree.tree.filter(n => n.type === 'blob' && /\.js$/i.test(n.path) && !/\.min\.js$/i.test(n.path)).map(n => n.path);
 }
 
+// Optional `searchQueries` in index-sources.json: each query runs against the
+// GitHub repository search API and matching public repos join the scan list,
+// so new plugin repos are picked up automatically without manual seeding.
+// Discovery only adds repos whose SPDX license is already allowed (an explicit
+// LICENSE file); header-only MIT repos can still be seeded via repos[]/users[].
+async function discoverRepos(queries, allowed, perQueryPages = 3) {
+  const out = [];
+  for (const q of queries) {
+    for (let page = 1; page <= perQueryPages; page++) {
+      const r = await ghJson(`${API}/search/repositories?q=${encodeURIComponent(q)}&per_page=100&page=${page}`);
+      if (!r || !Array.isArray(r.items) || r.items.length === 0) break;
+      for (const it of r.items) {
+        if (it.fork || it.archived) continue;
+        const spdx = it.license && it.license.spdx_id;
+        if (spdx && allowed.has(spdx)) out.push({ owner: it.owner.login, repo: it.name, origin: 'auto' });
+      }
+      if (r.items.length < 100) break;
+    }
+  }
+  return out;
+}
+
+// Optional `codeSearchQueries`: GitHub CODE search over the plugin annotations
+// themselves (e.g. '"@target MZ" extension:js'). Language-independent and
+// metadata-independent: it finds plugin repos that have no description/topics,
+// and repos whose MIT grant exists only in the plugin headers — which
+// repository search can never license-filter. Hits are mapped to their parent
+// repos; the normal license gate (repo SPDX or per-file header declaration)
+// still applies downstream, as does the deployed-game skip. The code-search
+// API requires auth and has a strict secondary rate limit (~10 req/min), so
+// requests are spaced out.
+async function discoverReposFromCode(queries, perQueryPages = 3) {
+  if (!TOKEN) { console.warn('[discover:code] skipped — GITHUB_TOKEN required for code search'); return []; }
+  const out = [];
+  for (const q of queries) {
+    for (let page = 1; page <= perQueryPages; page++) {
+      await new Promise(s => setTimeout(s, 6500)); // stay under the code-search rate limit
+      const r = await ghJson(`${API}/search/code?q=${encodeURIComponent(q)}&per_page=100&page=${page}`);
+      if (!r || !Array.isArray(r.items) || r.items.length === 0) break;
+      for (const it of r.items) {
+        const repo = it.repository;
+        if (!repo || repo.fork || repo.archived || repo.private) continue;
+        out.push({ owner: repo.owner.login, repo: repo.name, origin: 'auto' });
+      }
+      if (r.items.length < 100) break;
+    }
+  }
+  return out;
+}
+
+function dedupeRepos(repos) {
+  const seen = new Set();
+  return repos.filter(r => {
+    const k = `${r.owner}/${r.repo}`.toLowerCase();
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
 async function main() {
   if (!TOKEN) console.warn('[warn] GITHUB_TOKEN not set — API limited to 60 req/h.');
   const cfg = JSON.parse(fs.readFileSync(SOURCES, 'utf8'));
-  const allowed = new Set(cfg.allowedLicenses || ['MIT', 'Unlicense']);
+  const allowed = new Set(cfg.allowedLicenses || ['MIT']);
   const existing = fs.existsSync(OUT) ? JSON.parse(fs.readFileSync(OUT, 'utf8')) : [];
   const byRepoDir = {};
   for (const e of existing) { (byRepoDir[e.repoDir] || (byRepoDir[e.repoDir] = [])).push(e); }
 
   const specs = [...(cfg.repos || []), ...(cfg.repoDirs || [])];
   const repos = [];
-  for (const spec of specs) { const r = await resolveRepo(spec); if (r) repos.push(r); else console.warn('[skip] cannot resolve ' + spec); }
-  for (const user of cfg.users || []) repos.push(...await listUserRepos(user));
+  for (const spec of specs) { const r = await resolveRepo(spec); if (r) repos.push({ ...r, origin: 'seed' }); else console.warn('[skip] cannot resolve ' + spec); }
+  for (const user of cfg.users || []) repos.push(...(await listUserRepos(user)).map(r => ({ ...r, origin: 'auto' })));
+  // Discovery failures must not fail the whole run (the seeded repos still
+  // rebuild); they are logged so a silent zero-contribution is visible.
+  if ((cfg.searchQueries || []).length > 0) {
+    try {
+      const found = await discoverRepos(cfg.searchQueries, allowed);
+      console.log(`[discover] ${found.length} candidate repo(s) from ${cfg.searchQueries.length} search query(ies)`);
+      repos.push(...found);
+    } catch (e) { console.warn(`[discover] repository search failed: ${e.message}`); }
+  }
+  if ((cfg.codeSearchQueries || []).length > 0) {
+    try {
+      const found = await discoverReposFromCode(cfg.codeSearchQueries);
+      console.log(`[discover:code] ${found.length} candidate repo(s) from ${cfg.codeSearchQueries.length} code query(ies)`);
+      repos.push(...found);
+    } catch (e) { console.warn(`[discover:code] code search failed: ${e.message}`); }
+  }
+  const uniqueRepos = dedupeRepos(repos);
 
   const result = [];
-  for (const { owner, repo } of repos) {
+  for (const { owner, repo, origin } of uniqueRepos) {
     const repoDir = `${owner}-${repo}`;
     try {
       const info = await ghJson(`${API}/repos/${owner}/${repo}`);
       const repoSpdx = (info && info.license && info.license.spdx_id) || '';
       const branch = info.default_branch || 'main';
       const files = await listJsFiles(owner, repo, branch);
+      if (origin !== 'seed' && isGameProjectTree(files)) {
+        console.log(`[game] ${repoDir}: deployed game project — skipped`);
+        continue;
+      }
       let kept = 0;
       for (const p of files) {
         try {
           const src = await ghRaw(owner, repo, branch, p);
-          // Trust the repo SPDX when it is MIT/Unlicense; otherwise fall back
+          // Trust the repo SPDX when it is an allowed license; otherwise fall back
           // to a license declared in the plugin's own header (so repos without
           // a LICENSE file but with MIT-licensed plugins are still included).
           const license = allowed.has(repoSpdx) ? repoSpdx : detectLicenseFromSource(src);

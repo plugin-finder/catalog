@@ -102,6 +102,11 @@ export function pluginSourceToEntry(src, { owner, repo, relativePath, license, b
     filename: relativePath.split('/').pop(),
     author: meta.author,
     repoDir: `${owner}-${repo}`,
+    // repoDir joins owner and repo with '-', which is ambiguous to split back
+    // when the owner itself contains a dash (e.g. "pota-gon" → repoDir
+    // "pota-gon-RPGMakerMZ" → wrong "pota/gon-RPGMakerMZ"). Emit an explicit
+    // unambiguous slug in that case; the app prefers it over splitRepoDir.
+    ...(owner.includes('-') ? { repoSlug: `${owner}/${repo}` } : {}),
     relativePath,
     description: meta.plugindesc,
     target: detectTarget(meta, src),

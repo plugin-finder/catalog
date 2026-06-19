@@ -30,8 +30,29 @@ export function splitRepoDir(repoDir) {
   return out;
 }
 
+// Map a raw annotation-block locale code (e.g. '', 'ja', 'EN', 'zh', 'zh-TW')
+// to an app-supported locale key so the catalog's per-language descriptions can
+// be matched against the UI locale. The no-suffix default block ('') is treated
+// as 'ja' when its text is Japanese, otherwise 'en'. Unknown codes are returned
+// lowercased (never dropped).
+// NOTE: keep in sync with mapBlockLocale in electron/src/core/lang.js — this
+// file is intentionally dependency-free and cannot import from there.
+const HAS_JP = /[぀-ヿ㐀-鿿]/; // hiragana, katakana, CJK ideographs
+export function mapBlockLocale(code, text) {
+  const low = (code || '').toLowerCase();
+  if (!low) return HAS_JP.test(text || '') ? 'ja' : 'en';
+  if (/^zh[-_](tw|hk|mo|hant)/.test(low) || low === 'zh-hant') return 'zh-TW';
+  if (low.startsWith('zh')) return 'zh-CN';
+  if (low.startsWith('pt')) return 'pt-BR';
+  const prefix = low.split(/[-_]/)[0];
+  const known = ['ja', 'en', 'ko', 'de', 'es', 'fr', 'it', 'pl', 'ru'];
+  return known.includes(prefix) ? prefix : low;
+}
+
 // Minimal annotation read: scan /*: blocks and prefer the default/English one
-// (the catalog shows English descriptions). Returns author/plugindesc/target/help.
+// for the canonical `plugindesc`/`help`. `descriptions` additionally captures
+// the @plugindesc of EVERY language block (keyed by mapped locale) so the app
+// can show the description matching the user's display language.
 // Lines may or may not carry the conventional leading ` * ` — the MZ
 // PluginManager accepts bare `@tag` lines too (e.g. unagiootoro's plugins),
 // so the tag regex treats the asterisk as optional.
@@ -43,13 +64,20 @@ export function extractMeta(src) {
   let m;
   while ((m = re.exec(norm))) blocks.push({ locale: m[1] || '', body: m[2] });
   if (!blocks.length) return null;
-  const pick = blocks.find(b => b.locale === '' || b.locale.toLowerCase() === 'en') || blocks[0];
-  const body = pick.body;
-  const tag = (name) => {
+  const tagFrom = (body, name) => {
     const mm = body.match(new RegExp('^\\s*\\*?\\s*@' + name + '\\s*(.*)$', 'mi'));
     return mm ? mm[1].trim() : '';
   };
-  return { author: tag('author'), plugindesc: tag('plugindesc'), target: tag('target'), help: body };
+  const pick = blocks.find(b => b.locale === '' || b.locale.toLowerCase() === 'en') || blocks[0];
+  const body = pick.body;
+  const descriptions = {};
+  for (const b of blocks) {
+    const d = tagFrom(b.body, 'plugindesc');
+    if (!d) continue;
+    const key = mapBlockLocale(b.locale, d);
+    if (!descriptions[key]) descriptions[key] = d;
+  }
+  return { author: tagFrom(body, 'author'), plugindesc: tagFrom(body, 'plugindesc'), target: tagFrom(body, 'target'), help: body, descriptions };
 }
 
 export function detectTarget(meta, src) {
@@ -68,14 +96,20 @@ export function deriveTags(text) {
   return TAG_KEYWORDS.filter(t => hay.includes(t));
 }
 
-// Deployed-game detector. A tree that ships the RPG Maker runtime
-// (js/rpg_core.js = MV, js/rmmz_core.js = MZ) is a game project, not a plugin
-// collection: its js/plugins/ folder holds COPIES of third-party plugins
-// (often outdated, attributed to the wrong repo). Automatically discovered
-// game repos are skipped entirely; manually seeded repos[]/repoDirs[] are
-// curated by a human and never skipped.
+// Deployed-game / demo detector. A tree that ships the RPG Maker runtime
+// (js/rpg_core.js = MV, js/rmmz_core.js = MZ), the deployed plugin manifest
+// (js/plugins.js), or game data (data/System.json) is a game project, not a
+// plugin collection: its js/plugins/ folder holds COPIES of third-party
+// plugins (often outdated, attributed to the wrong repo). Automatically
+// discovered game repos are skipped entirely; manually seeded repos[]/
+// repoDirs[] are curated by a human and never skipped. A discovered repo that
+// is wrongly skipped (e.g. a plugin bundled with a demo) can be force-included
+// by adding it to repos[].
 export function isGameProjectTree(paths) {
-  return (paths || []).some(p => /(^|\/)js\/(rmmz_core|rpg_core)\.js$/i.test(p));
+  return (paths || []).some(p =>
+    /(^|\/)js\/(rmmz_core|rpg_core)\.js$/i.test(p) ||
+    /(^|\/)js\/plugins\.js$/i.test(p) ||
+    /(^|\/)data\/System\.json$/i.test(p));
 }
 
 // Detect an explicit MIT declaration in the plugin's own header. Many authors
@@ -98,6 +132,9 @@ export function pluginSourceToEntry(src, { owner, repo, relativePath, license, b
   const meta = extractMeta(src);
   if (!meta) return null;
   if (!meta.plugindesc && !meta.author) return null;
+  // Attach the per-language map only when 2+ languages are present; otherwise
+  // the app falls back to `description` and the field would just bloat the index.
+  const multiLang = meta.descriptions && Object.keys(meta.descriptions).length >= 2;
   return {
     filename: relativePath.split('/').pop(),
     author: meta.author,
@@ -109,6 +146,7 @@ export function pluginSourceToEntry(src, { owner, repo, relativePath, license, b
     ...(owner.includes('-') ? { repoSlug: `${owner}/${repo}` } : {}),
     relativePath,
     description: meta.plugindesc,
+    ...(multiLang ? { descriptions: meta.descriptions } : {}),
     target: detectTarget(meta, src),
     tags: deriveTags(`${relativePath} ${meta.plugindesc} ${meta.help}`),
     license,
@@ -125,11 +163,58 @@ export function pluginSourceToEntry(src, { owner, repo, relativePath, license, b
 export function dedupeEntriesPreferDefault(entries) {
   const byFile = new Map();
   for (const e of entries) {
-    const k = `${e.repoDir} ${e.relativePath}`;
+    const k = `${e.repoDir}\x00${e.relativePath}`;
     const prev = byFile.get(k);
     if (!prev || (prev.branch && !e.branch)) byFile.set(k, e);
   }
   return [...byFile.values()];
+}
+
+// Cross-repo de-duplication. The same plugin often appears in several repos:
+// mirror/translation accounts (e.g. munokura re-hosting DarkPlasma/Yana),
+// copies sitting in other authors' collections, or the js/plugins/ folder of a
+// game project. Collapse entries that share filename + author + target down to
+// a single source repo, preferring the canonical one:
+//   1. a seeded/curated repo over an auto-discovered one,
+//   2. then the repo hosting the fewest distinct authors (an author's own repo
+//      over a many-author aggregator/mirror),
+//   3. then the shortest / lexically-first repoDir for determinism.
+// All of the winning repo's matching entries are kept, so an author's own
+// MV/MZ or versioned variants survive; only OTHER repos' copies drop. Entries
+// with no author are never merged (their identity can't be confirmed). `target`
+// is part of the key so an MV and an MZ build of the same file are not merged.
+export function dedupeAcrossReposByPlugin(entries) {
+  const authorsByRepo = new Map();          // repoDir -> Set(author)
+  for (const e of entries) {
+    if (!authorsByRepo.has(e.repoDir)) authorsByRepo.set(e.repoDir, new Set());
+    authorsByRepo.get(e.repoDir).add((e.author || '').trim());
+  }
+  const repoRank = (rd, sample) => [
+    sample._origin === 'seed' ? 0 : 1,
+    authorsByRepo.get(rd).size,
+    rd.length,
+    rd,
+  ];
+  const groups = new Map();                 // key -> entries[]
+  const keep = [];
+  for (const e of entries) {
+    const author = (e.author || '').trim();
+    if (!author) { keep.push(e); continue; }   // unkeyed: always kept
+    const k = `${e.filename.toLowerCase()} ${author} ${e.target || ''}`;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(e);
+  }
+  const less = (a, b) => { for (let i = 0; i < a.length; i++) { if (a[i] < b[i]) return true; if (a[i] > b[i]) return false; } return false; };
+  for (const es of groups.values()) {
+    const repos = [...new Set(es.map(e => e.repoDir))];
+    if (repos.length < 2) { keep.push(...es); continue; }
+    const sample = {};                       // one entry per repo (carries _origin)
+    for (const e of es) if (!sample[e.repoDir]) sample[e.repoDir] = e;
+    let winner = repos[0];
+    for (const rd of repos) if (less(repoRank(rd, sample[rd]), repoRank(winner, sample[winner]))) winner = rd;
+    for (const e of es) if (e.repoDir === winner) keep.push(e);
+  }
+  return keep;
 }
 
 function ghHeaders() {
@@ -278,10 +363,15 @@ async function main() {
   }
   const uniqueRepos = dedupeRepos(repos);
 
+  // Repos a human has explicitly excluded (deployed games, demos, unwanted
+  // mirrors). Accept either "owner/repo" or the repoDir "owner-repo" form.
+  const excludeSet = new Set((cfg.excludeRepos || []).map(s => s.includes('/') ? s.replace('/', '-') : s));
+
   const result = [];
   for (const { owner, repo, origin, branch: pinnedBranch } of uniqueRepos) {
     const repoDir = `${owner}-${repo}`;
     const label = pinnedBranch ? `${repoDir}#${pinnedBranch}` : repoDir;
+    if (excludeSet.has(repoDir)) { console.log(`[exclude] ${repoDir}: in excludeRepos`); continue; }
     try {
       const info = await ghJson(`${API}/repos/${owner}/${repo}`);
       const repoSpdx = (info && info.license && info.license.spdx_id) || '';
@@ -301,7 +391,7 @@ async function main() {
           const license = allowed.has(repoSpdx) ? repoSpdx : detectLicenseFromSource(src);
           if (!license || !allowed.has(license)) continue;
           const entry = pluginSourceToEntry(src, { owner, repo, relativePath: p, license, branch: pinnedBranch });
-          if (entry) { result.push(entry); kept++; }
+          if (entry) { entry._origin = origin; result.push(entry); kept++; }
         } catch (_) { /* skip file */ }
       }
       console.log(`[ok] ${label}: ${kept} plugin(s)`);
@@ -311,7 +401,11 @@ async function main() {
       console.warn(`[keep] ${label}: ${e.message}; kept ${fb.length}`);
     }
   }
-  const entries = dedupeEntriesPreferDefault(result);
+  let entries = dedupeEntriesPreferDefault(result);
+  const beforeCross = entries.length;
+  entries = dedupeAcrossReposByPlugin(entries);
+  console.log(`[dedup] cross-repo (mirrors/copies): ${beforeCross} → ${entries.length} (-${beforeCross - entries.length})`);
+  entries = entries.map(({ _origin, ...e }) => e);   // drop transient build-only field
   entries.sort((a, b) => a.repoDir.localeCompare(b.repoDir) || a.relativePath.localeCompare(b.relativePath));
   console.log(`Total: ${entries.length} entries`);
   fs.writeFileSync(OUT, JSON.stringify(entries, null, 0) + '\n');
